@@ -154,9 +154,21 @@ pub fn get_sim_profile(sim_type: SimType) -> SimSettings {
             reverse: true,
             sim_type: SimType::RNAR9,
         },
-        _ => {
-            unimplemented!()
-        }
+        // R9 DNA reads pre-computed, already-digitised `.npy` squiggle (see
+        // python/make_squiggle.py, which digitises with digitisation=8192,
+        // range=1350). These values are therefore only used as calibration
+        // metadata in the device service, not to regenerate signal on the fly.
+        SimType::DNAR9 => SimSettings {
+            digitisation: 8192,
+            scale: 1350.0 / 8192.0,
+            range: 1350.0,
+            offset: 0.0,
+            samples_per_base: 9,
+            kmer_len: 6,
+            noise: false,
+            reverse: false,
+            sim_type: SimType::DNAR9,
+        },
     }
 }
 

@@ -22,7 +22,7 @@ export DYLD_FALLBACK_LIBRARY_PATH="$HDF5_DIR/lib"
 ./target/release/icarust -s Profile_tomls/config_dnar10.toml -v   # run from repo root
 ```
 
-Only `(DNA,R10)` and `(RNA,R9)` configs currently run (see bug #1).
+`(DNA,R10)`, `(DNA,R9)` and `(RNA,R9)` configs run (DNA+R9 fixed in #1). Only RNA+R10 is rejected (unsupported).
 
 Client verification (no hardware needed — Icarust IS the simulated device):
 `pip install minknow_api` in a venv, set `MINKNOW_TRUSTED_CA` to a ca.crt matching the
@@ -34,27 +34,32 @@ server cert (see bug #2), then `Manager(host="localhost", port=10000)` →
 
 ## 🔴 Critical — break basic usage
 
-- [ ] **#1 DNA+R9 panics at startup** — `src/main.rs:341-347`
+- [x] **#1 DNA+R9 panics at startup** — `src/main.rs:341-347` ✅ DONE
   - `sim_type` match has no `(DNA,R9)` arm → `panic!("We shouldn't be readig sequence for R10 RNA or R9DNA")`. `config_dnar9.toml` dies instantly. `get_sim_profile` (`src/simulation.rs:157`) has `DNAR9 => unimplemented!()`.
   - **Fix:** add `(DNA,R9) => SimType::DNAR9` arm + a real `SimSettings` for `DNAR9` (R9.4.1 digitisation/range/offset/scale — metadata only, signal is pre-digitised `.npy`).
+  - **Done:** added arm in main.rs + `DNAR9` profile (digitisation=8192, range=1350, from make_squiggle.py) in simulation.rs; RNA+R10 now the only panicking combo. Verified `config_dnar9.toml` runs, reads flowing.
 
-- [ ] **#2 Committed TLS certs are a mismatched pair** — `static/tls_certs/`
+- [x] **#2 Committed TLS certs are a mismatched pair** — `static/tls_certs/` ✅ DONE
   - `server.crt` issued by `CN=LocalhostCA` but `ca.crt` is `CN=MyRootCA`; `openssl verify -CAfile ca.crt server.crt` FAILS → no client can handshake (broke in commit b9faa14). `server.crt` also has no SAN.
   - **Fix:** regenerate consistent CA + server cert with `subjectAltName=DNS:localhost,IP:127.0.0.1`; commit all three matching files.
+  - **Done:** regenerated CA (`CN=Icarust Root CA`) + server cert with SAN (localhost,*.localhost,127.0.0.1,::1), 825-day validity; `openssl verify` OK. Verified Python client handshakes with repo `ca.crt`.
 
-- [ ] **#3 `manager.describe_host()` is `unimplemented!()`** — `src/impl_services/manager.rs:48-53`
+- [x] **#3 `manager.describe_host()` is `unimplemented!()`** — `src/impl_services/manager.rs:48-53` ✅ DONE
   - Calling it panics the handler → client gets RST_STREAM. Newer `minknow_api` calls it.
   - **Fix:** return a populated `DescribeHostResponse`.
+  - **Done:** returns `DescribeHostResponse` (empty product_code = generic host, description "Icarust simulated host", network_name "localhost", can_sequence_offline true). Verified via client.
 
 ## 🟠 High — silent wrong behavior
 
-- [ ] **#4 Inconsistent default sample rate (4000 vs 5000)** — `src/main.rs:339` vs `src/main.rs:220`
+- [x] **#4 Inconsistent default sample rate (4000 vs 5000)** — `src/main.rs:339` vs `src/main.rs:220` ✅ DONE
   - main.rs uses `sample_rate.unwrap_or(5000)` for the Device service; `Parameters::get_sample_rate()` uses `unwrap_or(4000)` everywhere else. Unset rate ⇒ device reports 5000 Hz while data is 4000 Hz.
   - **Fix:** use `get_sample_rate()` in main.rs (single source of truth).
+  - **Done:** main.rs now calls `config.parameters.get_sample_rate()`. Verified: profile with no `sample_rate` → device reports 4000.
 
-- [ ] **#5 Manager advertises hardcoded position port** — `src/main.rs:357-360`
+- [x] **#5 Manager advertises hardcoded position port** — `src/main.rs:357-360` ✅ DONE
   - `RpcPorts { secure: 10001, ... }` hardcoded, but position server binds `a_port` from `config.ini`. Changing the port ⇒ clients told to connect to 10001 (wrong).
-  - **Fix:** `secure: a_port as i32`.
+  - **Fix:** `secure: a_port as u32` (field is `u32`, not `i32`).
+  - **Done:** verified — config.ini position=10055 → manager advertises 10055, client connected to it.
 
 - [ ] **#6 Read-length→samples scaling ignores `sequencing_speed`** — `src/main.rs:250-251`
   - `ReadLengthDist::new(mrl / 400.0 * sample_rate)` hardcodes 400, but signal uses `samples_per_base = sample_rate / sequencing_speed` (`src/impl_services/data.rs:1145`). With `sequencing_speed=450` (in `config_dnar9.toml`!) lengths disagree → wrong durations.

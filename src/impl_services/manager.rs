@@ -44,12 +44,20 @@ impl ManagerService for Manager {
             guppy_connected_version: String::from("6hopefully"),
         }))
     }
-    #[allow(clippy::diverging_sub_expression)]
     async fn describe_host(
         &self,
         _request: Request<DescribeHostRequest>,
     ) -> Result<Response<DescribeHostResponse>, Status> {
-        unimplemented!()
+        Ok(Response::new(DescribeHostResponse {
+            // Empty product_code => host is a regular computer (not an integrated
+            // ONT device), which is what this simulator pretends to be.
+            product_code: String::new(),
+            description: "Icarust simulated host".to_string(),
+            serial: String::new(),
+            network_name: "localhost".to_string(),
+            needs_association: false,
+            can_sequence_offline: true,
+        }))
     }
 
     type flow_cell_positionsStream = ReceiverStream<Result<FlowCellPositionsResponse, Status>>;

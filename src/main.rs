@@ -336,13 +336,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_into()
         .unwrap();
 
-    let sample_rate = config.parameters.sample_rate.unwrap_or(5000) as u32;
+    let sample_rate = config.parameters.get_sample_rate() as u32;
 
     let sim_type = match (config.check_dna_or_rna(), config.check_pore_type()) {
         (NucleotideType::DNA, PoreType::R10) => SimType::DNAR10,
+        (NucleotideType::DNA, PoreType::R9) => SimType::DNAR9,
         (NucleotideType::RNA, PoreType::R9) => SimType::RNAR9,
-        _ => {
-            panic!("We shouldn't be readig sequence for R10 RNA or R9DNA");
+        (NucleotideType::RNA, PoreType::R10) => {
+            panic!("RNA with an R10 pore is not supported - use R9 for RNA.");
         }
     };
     let profile = simulation::get_sim_profile(sim_type);
@@ -356,7 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             name: config.parameters.device_id,
             state: 1,
             rpc_ports: Some(RpcPorts {
-                secure: 10001,
+                secure: a_port as u32,
                 secure_grpc_web: 420,
             }),
             protocol_state: 1,

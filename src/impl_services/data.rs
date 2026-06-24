@@ -61,7 +61,9 @@ use crate::PoreType;
 use crate::{simulation, NucleotideType};
 use crate::{Config, Sample, _load_toml};
 
-/// unused
+/// STUB (#18): populated from the client's stream `Setup` request but the values
+/// (first/last channel, raw_data_type) currently don't affect what is served.
+/// Kept as the hook for honouring stream setup in future.
 #[derive(Debug)]
 struct RunSetup {
     setup: bool,
@@ -188,7 +190,8 @@ impl RunSetup {
 #[derive(Debug)]
 pub struct DataServiceServicer {
     read_data: Arc<Mutex<Vec<ReadInfo>>>,
-    // to be implemented
+    // DEAD/STUB (#18): write-only — constructed and stored but never read. Kept
+    // for now; intended to carry action responses back to the client one day.
     action_responses: Arc<Mutex<Vec<get_live_reads_response::ActionResponse>>>,
     setup: Arc<Mutex<RunSetup>>,
     break_chunks_ms: u64,
@@ -334,18 +337,20 @@ enum OutputFileType {
 /// Start the thread that will handle writing out the FAST5 file,
 fn start_write_out_thread(
     run_id: String,
-    config: Cli,
+    cli_opts: Cli,
+    config: Config,
     output_path: PathBuf,
     write_out_gracefully: Arc<Mutex<bool>>,
 ) -> SyncSender<ReadInfo> {
     let (complete_read_tx, complete_read_rx) = sync_channel(8000);
-    let x = config;
+    let x = cli_opts;
 
     thread::spawn(move || {
         let mut read_infos: Vec<ReadInfo> = Vec::with_capacity(8000);
         let exp_start_time = Utc::now();
         let iso_time = exp_start_time.to_rfc3339_opts(SecondsFormat::Millis, false);
-        let config = _load_toml(&x.simulation_profile);
+        // Config is parsed once in DataServiceServicer::new and passed in (was
+        // re-parsed from disk here).
         let sample_rate = config.parameters.get_sample_rate().to_string();
         let ic_pt = config.check_pore_type();
         let experiment_duration = config.get_experiment_duration_set().to_string();
@@ -1243,7 +1248,9 @@ fn read_views_of_squiggle_data(
 /// Convert an elapased period of time in milliseconds tinto samples
 
 fn convert_milliseconds_to_samples(milliseconds: i64, sampling: u64) -> usize {
-    (milliseconds as f64 * (sampling / 1000) as f64) as usize
+    // Divide in floating point: `sampling / 1000` as integers loses precision for
+    // sample rates that aren't a multiple of 1000.
+    (milliseconds as f64 * sampling as f64 / 1000.0) as usize
 }
 
 ///
@@ -1461,8 +1468,13 @@ impl DataServiceServicer {
         let (views, dist) = process_samples_from_config(&config);
         let files: Vec<String> = views.keys().cloned().collect();
         let write_out_gracefully = Arc::clone(&graceful_shutdown);
-        let complete_read_tx =
-            start_write_out_thread(run_id, cli_opts, output_path, write_out_gracefully);
+        let complete_read_tx = start_write_out_thread(
+            run_id,
+            cli_opts,
+            config.clone(),
+            output_path,
+            write_out_gracefully,
+        );
         let mut rng: StdRng = rand::SeedableRng::seed_from_u64(1234567);
 
         let starting_functional_pore_count =
@@ -1660,6 +1672,8 @@ impl DataService for DataServiceServicer {
             });
             // spawn an async thread that will get the read data from the data generation thread and return it.
             tokio::spawn(async move {
+                // Reference point for the `*_since_start` fields reported to the client.
+                let serve_start = Instant::now();
                 loop{
                     let now2 = Instant::now();
                     let mut container: Vec<(usize, ReadData)> = Vec::with_capacity(channel_size);
@@ -1749,13 +1763,15 @@ impl DataService for DataServiceServicer {
                     }
                     let mut channel_data = HashMap::with_capacity(24);
 
+                    let seconds_since_start = serve_start.elapsed().as_secs_f64();
+                    let samples_since_start = (seconds_since_start * sample_rate_hz as f64) as u64;
                     for chunk in container.chunks(24) {
                         for (channel,read_data) in chunk {
                             channel_data.insert(channel.clone() as u32, read_data.clone());
                         }
                         tx_get_live_reads_response.send(GetLiveReadsResponse{
-                            samples_since_start: 0,
-                            seconds_since_start: 0.0,
+                            samples_since_start,
+                            seconds_since_start,
                             channels: channel_data.clone(),
                             action_responses: vec![]
                         }).await.unwrap_or_else(|_| {

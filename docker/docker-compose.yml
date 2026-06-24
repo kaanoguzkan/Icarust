@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   icarust:
     image: adoni5/icarust:latest

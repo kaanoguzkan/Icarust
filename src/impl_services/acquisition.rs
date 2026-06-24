@@ -30,6 +30,8 @@ pub struct Acquisition {
 #[tonic::async_trait]
 impl AcquisitionService for Acquisition {
     type watch_current_acquisition_runStream = ReceiverStream<Result<AcquisitionRunInfo, Status>>;
+    // STUB (#18): sends a single canned, mostly-empty AcquisitionRunInfo then ends.
+    // Required by the AcquisitionService trait; not driven by real run state.
     async fn watch_current_acquisition_run(
         &self,
         _request: Request<WatchCurrentAcquisitionRunRequest>,

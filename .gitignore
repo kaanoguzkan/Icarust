@@ -1,6 +1,6 @@
 /target
 .vscode/settings.json
-*Cargo.lock
+# Cargo.lock is intentionally committed for reproducible native + Docker builds.
 *.idea*
 /test_basecall
 *.fast5

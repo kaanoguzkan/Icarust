@@ -13,3 +13,7 @@ basecall_test.py
 *.tensor
 *.bam
 *config.toml
+# TLS material is generated locally (static/tls_certs/generate_certs.sh), never committed
+static/tls_certs/*.key
+static/tls_certs/*.crt
+static/tls_certs/*.srl

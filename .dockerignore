@@ -3,3 +3,6 @@ target/
 docker/output/
 *.fast5
 *.pod5
+static/tls_certs/*.key
+static/tls_certs/*.crt
+static/tls_certs/*.srl

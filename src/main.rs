@@ -261,6 +261,68 @@ impl Sample {
     }
 }
 
+/// Ensure a usable TLS cert chain exists in `cert_dir`, generating a self-signed
+/// CA + `localhost` server cert if `server.crt`/`server.key`/`ca.crt` are missing.
+///
+/// This lets Icarust run out of the box without committing any private keys: on first
+/// run it writes `ca.crt`, `server.crt` and `server.key` (with a `localhost`/`127.0.0.1`
+/// SAN, valid ~2 years). Clients trust the generated `ca.crt`.
+///
+/// ```no_run
+/// # use std::path::PathBuf;
+/// ensure_tls_certs(&PathBuf::from("static/tls_certs")).unwrap();
+/// ```
+fn ensure_tls_certs(cert_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose, SanType,
+    };
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let server_crt = cert_dir.join("server.crt");
+    let server_key = cert_dir.join("server.key");
+    let ca_crt = cert_dir.join("ca.crt");
+    // All three present -> nothing to do.
+    if server_crt.exists() && server_key.exists() && ca_crt.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(cert_dir)?;
+    info!("No TLS certs found in {:?} - generating a self-signed CA + server cert.", cert_dir);
+
+    // Certificate authority.
+    let ca_key = KeyPair::generate()?;
+    let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "Icarust Root CA");
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let ca_cert = ca_params.self_signed(&ca_key)?;
+
+    // Server certificate signed by the CA, with a SAN for localhost.
+    let server_kp = KeyPair::generate()?;
+    let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "localhost");
+    params.subject_alt_names = vec![
+        SanType::DnsName("localhost".try_into()?),
+        SanType::IpAddress(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+    ];
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let server_cert = params.signed_by(&server_kp, &ca_cert, &ca_key)?;
+
+    fs::write(&ca_crt, ca_cert.pem())?;
+    fs::write(&server_crt, server_cert.pem())?;
+    fs::write(&server_key, server_kp.serialize_pem())?;
+    info!("Wrote ca.crt, server.crt, server.key to {:?}", cert_dir);
+    Ok(())
+}
+
 /// Loads our config TOML to get the sample name, experiment name and flowcell name, which is returned as a Config struct.
 fn _load_toml(file_path: &std::path::PathBuf) -> Config {
     let contents =
@@ -311,6 +373,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get("TLS", "cert-dir")
             .expect("Tls cert dir not found in config.ini"),
     ); // Setup the TLS certifcates using the Minknow TLS certs
+       // Generate a self-signed CA + server cert on first run if they're missing,
+       // so Icarust works out of the box without any committed private keys.
+    ensure_tls_certs(&tls_cert_path)?;
     let cert = tokio::fs::read(format!("{}", tls_cert_path.join("server.crt").display()))
         .await
         .expect("No TLS certs found");

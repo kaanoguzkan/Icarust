@@ -17,11 +17,15 @@ writes **FAST5** or **POD5** files. **You do not need any sequencing hardware �
 The binary **must be run from the repo root** (it loads `vbz_plugin/` and `static/`
 by relative path).
 
+> **TLS certs:** generated automatically. On first run Icarust creates a self-signed
+> CA + `localhost` server cert in the `cert-dir` if none exist — nothing is committed
+> and no manual step is needed. (A `static/tls_certs/generate_certs.sh` helper also
+> exists if you ever want to (re)create them by hand.)
+
 ### Linux server (production target)
 
 ```bash
 sudo apt update && sudo apt install -y protobuf-compiler libprotobuf-dev libhdf5-dev
-# protoc must be > 3.6.1 (Ubuntu 20.04's 3.6.1 fails --experimental_allow_proto3_optional)
 
 cargo build --release
 ./target/release/icarust -s Profile_tomls/config_dnar10.toml -v      # FAST5 (default)
@@ -112,8 +116,14 @@ docker compose run icarust -v -p -s /configs/config_dnar10.toml
 
 `docker/docker-compose.yml` maps host ↔ container:
 `./configs → /configs`, `./squiggle_arrs → /squiggle_arrs`, `./output → /tmp`, and
-publishes ports `10000` and `10001`. The container's `config.ini` uses
-`cert-dir = /static/tls_certs/` (baked into the image from `static/`).
+publishes ports `10000` and `10001`. The image generates its TLS certs at build time
+(`cert-dir = /static/tls_certs/`). To connect a client running **outside** the
+container, grab the CA it trusts:
+
+```bash
+docker cp "$(docker compose -f docker/docker-compose.yml ps -q icarust)":/static/tls_certs/ca.crt ./ca.crt
+export MINKNOW_TRUSTED_CA="$PWD/ca.crt"
+```
 
 > Build note: the Dockerfile builds against the committed `Cargo.lock`
 > (`cargo build --release --locked`) on `rust:1.96-bookworm`. If you build for an
@@ -143,12 +153,12 @@ Python/readfish client connects through the published ports over TLS.
 3. **macOS needs `hdf5@1.10`, not `hdf5`.** Homebrew's current `hdf5` is v2.x and the
    old `hdf5-sys 0.8.1` (via the FAST5 dep) panics parsing the version.
 
-4. **TLS certs were regenerated** (the previously committed pair was mismatched —
-   `server.crt` signed by `LocalhostCA` but `ca.crt` was `MyRootCA`, so no client could
-   handshake). The new CA + server cert (SAN `localhost`/`127.0.0.1`) are committed and
-   self-consistent. ⚠️ **A private key (`static/tls_certs/server.key`, `ca.key`) is
-   committed.** Harmless here (it only secures a localhost mock), but for a public fork
-   be aware you're publishing a private key intentionally.
+4. **TLS certs are generated automatically, never committed.** On startup Icarust
+   creates a self-consistent CA + `localhost` server cert (SAN `localhost`/`127.0.0.1`)
+   in the `cert-dir` if they're missing — no manual step. The cert/key files are
+   git-ignored so **no private key ever lands in the repo** (upstream committed a
+   private key *and* a mismatched cert pair — both fixed here). Clients trust the
+   generated `ca.crt`. A `generate_certs.sh` helper exists for manual (re)generation.
 
 5. **Must run from the repo root** (relative paths to `vbz_plugin/` and `static/`).
 

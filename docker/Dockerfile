@@ -2,10 +2,14 @@
 FROM rust:1.96-bookworm AS build
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 WORKDIR /usr/src/icarust
-RUN apt update &&  apt-get -y install make cmake libprotobuf-dev protobuf-compiler libhdf5-dev libzstd-dev git
+RUN apt update &&  apt-get -y install make cmake libprotobuf-dev protobuf-compiler libhdf5-dev libzstd-dev git openssl
 # keep commented command to build vbz compression kept just in case I need it later
 #RUN git clone https://github.com/nanoporetech/vbz_compression.git && cd vbz_compression && mkdir build && git submodule update --init && cd build && cmake -D CMAKE_BUILD_TYPE=Release -D ENABLE_CONAN=OFF -D ENABLE_PERF_TESTING=OFF -D ENABLE_PYTHON=OFF .. && make -j
 COPY ../ ./
+# TLS certs aren't committed — bake a set into the image (the runtime user can't
+# write to /static, so we generate at build instead of relying on runtime auto-gen).
+# World-readable so the non-root runtime user can load them.
+RUN bash static/tls_certs/generate_certs.sh && chmod 644 static/tls_certs/ca.crt static/tls_certs/server.crt static/tls_certs/server.key
 # Build against the committed Cargo.lock (pins chrono 0.4.31 so arrow-arith 49,
 # the POD5 dep, compiles). --locked fails loudly if the lock is missing/stale.
 RUN cargo build --release --locked

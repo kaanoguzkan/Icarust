@@ -42,6 +42,7 @@ podders = "0.1.4"
 #podders = { path = "../podders" }
 probability = "0.20.3"
 rayon = "1.10.0"
+rcgen = "0.13"
 
 
 [build-dependencies]

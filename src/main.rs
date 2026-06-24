@@ -245,11 +245,13 @@ impl Sample {
         &self,
         global_read_len: Option<f64>,
         sample_rate: u64,
+        sequencing_speed: usize,
     ) -> ReadLengthDist {
-        match self.mean_read_length {
-            Some(mrl) => ReadLengthDist::new(mrl / 400.0 * sample_rate as f64),
-            None => ReadLengthDist::new(global_read_len.unwrap() / 400.0 * sample_rate as f64),
-        }
+        // mean_read_length is in bases; convert to samples via the time to
+        // sequence it: samples = bases / sequencing_speed * sample_rate.
+        // (Previously hardcoded 400, ignoring a configured sequencing_speed.)
+        let mean_bases = self.mean_read_length.or(global_read_len).unwrap();
+        ReadLengthDist::new(mean_bases / sequencing_speed as f64 * sample_rate as f64)
     }
     pub fn is_amplicon(&self) -> bool {
         self.amplicon.unwrap_or(false)
@@ -273,6 +275,15 @@ fn _load_toml(file_path: &std::path::PathBuf) -> Config {
 /// sequencing position.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Point HDF5 at the bundled VBZ compression plugin so FAST5 output works
+    // without the user having to export HDF5_PLUGIN_PATH manually. Done before
+    // any threads are spawned (set_var is not thread-safe). Respects an existing
+    // override, and only sets it if the bundled plugin dir exists.
+    if std::env::var_os("HDF5_PLUGIN_PATH").is_none() {
+        if let Ok(plugin_dir) = std::fs::canonicalize("vbz_plugin") {
+            std::env::set_var("HDF5_PLUGIN_PATH", plugin_dir);
+        }
+    }
     // Parse the arguments from the command line
     let args = cli::Cli::parse();
     args.set_logging();

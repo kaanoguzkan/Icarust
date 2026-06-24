@@ -413,44 +413,44 @@ fn start_write_out_thread(
         }
         // loop to collect reads and write out files
         loop {
-            let run_info = if x.pod5 {
-                Some(RunInfoData {
-                    acquisition_id: run_id.clone(),
-                    acquisition_start_time: 1625097600000,
-                    adc_max: 2047,
-                    adc_min: 0,
-                    context_tags: context_tags
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
-                    experiment_name: "Experiment 1".to_string(),
-                    flow_cell_id: config.parameters.flowcell_name.to_string(),
-                    flow_cell_product_code: "FLO-MIN114".to_string(),
-                    protocol_name: "Protocol 1".to_string(),
-                    protocol_run_id: "PRID123".to_string(),
-                    protocol_start_time: 1625097600000,
-                    sample_id: config.parameters.sample_name.to_string(),
-                    sample_rate: config.parameters.get_sample_rate() as u16,
-                    sequencing_kit: "sqk-lsk114".to_string(),
-                    sequencer_position: "bamboo".to_string(),
-                    sequencer_position_type: "Gigachad".to_string(),
-                    software: "Icarust v1.0".to_string(),
-                    system_name: "Of a down".to_string(),
-                    system_type: "Entrenched Injustice".to_string(),
-                    tracking_id: tracking_id
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
-                })
-            } else {
-                None
+            // Build a fresh RunInfoData per pod5 file (the drain loop below can
+            // write several files in one pass, e.g. on graceful shutdown).
+            let build_run_info = || RunInfoData {
+                acquisition_id: run_id.clone(),
+                acquisition_start_time: 1625097600000,
+                adc_max: 2047,
+                adc_min: 0,
+                context_tags: context_tags
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                experiment_name: "Experiment 1".to_string(),
+                flow_cell_id: config.parameters.flowcell_name.to_string(),
+                flow_cell_product_code: "FLO-MIN114".to_string(),
+                protocol_name: "Protocol 1".to_string(),
+                protocol_run_id: "PRID123".to_string(),
+                protocol_start_time: 1625097600000,
+                sample_id: config.parameters.sample_name.to_string(),
+                sample_rate: config.parameters.get_sample_rate() as u16,
+                sequencing_kit: "sqk-lsk114".to_string(),
+                sequencer_position: "bamboo".to_string(),
+                sequencer_position_type: "Gigachad".to_string(),
+                software: "Icarust v1.0".to_string(),
+                system_name: "Of a down".to_string(),
+                system_type: "Entrenched Injustice".to_string(),
+                tracking_id: tracking_id
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
             };
             for finished_read_info in complete_read_rx.try_iter() {
                 read_infos.push(finished_read_info);
             }
             let z = { *write_out_gracefully.lock().unwrap() };
 
-            if read_infos.len() >= 4000 || z {
+            // On graceful shutdown, keep draining until ALL reads are written,
+            // not just the first 4000 batch (previously dropped the remainder).
+            while read_infos.len() >= 4000 || (z && !read_infos.is_empty()) {
                 let extension = if x.pod5 { ".pod5" } else { ".fast5" };
                 let output_file_name = format!(
                     "{}/{}_pass_{}_{}{}",
@@ -463,7 +463,7 @@ fn start_write_out_thread(
                 // drain 4000 reads and write them into a FAST5 file
                 let mut out_file = if x.pod5 {
                     let mut pod = Pod5File::new(&output_file_name).unwrap();
-                    pod.push_run_info(run_info.unwrap());
+                    pod.push_run_info(build_run_info());
                     pod.write_run_info_to_ipc();
                     OutputFileType::Pod5(pod)
                 } else {
@@ -474,6 +474,9 @@ fn start_write_out_thread(
                 };
                 info!("Writing out file to {}", output_file_name);
                 let range_end = std::cmp::min(4000, read_infos.len());
+                // Warn at most once per file if FAST5 writes fail (e.g. the VBZ
+                // compression plugin can't be loaded), instead of crashing.
+                let mut fast5_write_warned = false;
                 for to_write_info in read_infos.drain(..range_end) {
                     // skip this read if we are trying to write it out twice
                     if !read_numbers_seen.insert(to_write_info.read_id.clone()) {
@@ -484,7 +487,9 @@ fn start_write_out_thread(
                     if to_write_info.was_unblocked {
                         let unblock_time = to_write_info.time_unblocked;
                         let prev_time = to_write_info.start_time_utc;
-                        let elapsed_time = unblock_time.time() - prev_time.time();
+                        // Subtract full datetimes, not .time() (time-of-day), so the
+                        // delta stays correct across midnight / multi-day runs.
+                        let elapsed_time = unblock_time - prev_time;
                         let stop = convert_milliseconds_to_samples(
                             elapsed_time.num_milliseconds(),
                             config.parameters.get_sample_rate(),
@@ -530,17 +535,26 @@ fn start_write_out_thread(
                                 config.parameters.get_sample_rate() as f64,
                                 to_write_info.channel_number.clone(),
                             );
-                            multi
-                                .create_empty_read(
-                                    to_write_info.read_id.clone(),
-                                    run_id.clone(),
-                                    &tracking_id,
-                                    &context_tags,
-                                    channel_info,
-                                    &raw_attrs,
-                                    signal,
-                                )
-                                .unwrap();
+                            if let Err(e) = multi.create_empty_read(
+                                to_write_info.read_id.clone(),
+                                run_id.clone(),
+                                &tracking_id,
+                                &context_tags,
+                                channel_info,
+                                &raw_attrs,
+                                signal,
+                            ) {
+                                // Don't crash the writer (and cascade-kill the data
+                                // thread). Most commonly the VBZ HDF5 plugin isn't
+                                // loadable for this platform/arch — POD5 (-p) avoids it.
+                                if !fast5_write_warned {
+                                    error!("Failed to write read to FAST5 ({e}). Is the VBZ \
+                                        plugin available for this platform? Consider running \
+                                        with -p to write POD5 instead. Suppressing further \
+                                        FAST5 write errors for this file.");
+                                    fast5_write_warned = true;
+                                }
+                            }
                         }
                         OutputFileType::Pod5(ref mut pod5) => {
                             let end_reason = if to_write_info.was_unblocked {
@@ -606,14 +620,16 @@ fn start_write_out_thread(
 fn start_unblock_thread(
     channel_read_info: Arc<Mutex<Vec<ReadInfo>>>,
     run_setup: Arc<Mutex<RunSetup>>,
+    channel_size: usize,
 ) -> SyncSender<GetLiveReadsRequest> {
     let (tx, rx): (
         SyncSender<GetLiveReadsRequest>,
         Receiver<GetLiveReadsRequest>,
     ) = sync_channel(6000);
     thread::spawn(move || {
-        // We have like some actions to adress before we do anything
-        let mut read_numbers_actioned = [0; 3000];
+        // Track the last actioned read number per channel. Sized to the actual
+        // channel count (was a hardcoded [0; 3000], which panicked for >3000 channels).
+        let mut read_numbers_actioned = vec![0u32; channel_size];
         let mut total_unblocks = 0;
         let mut total_sr = 0;
         for get_live_req in rx.iter() {
@@ -665,7 +681,7 @@ fn setup(
 fn take_actions(
     action_request: get_live_reads_request::Request,
     channel_read_info: &Arc<Mutex<Vec<ReadInfo>>>,
-    read_numbers_actioned: &mut [u32; 3000],
+    read_numbers_actioned: &mut [u32],
 ) -> (usize, usize, usize) {
     // check that we have an action type and not a setup, whihc should be impossible
     debug!("Processing non setup actions");
@@ -717,7 +733,7 @@ fn unblock_reads(
     action_id: String,
     channel_number: usize,
     read_number: action::Read,
-    channel_num_to_read_num: &mut [u32; 3000],
+    channel_num_to_read_num: &mut [u32],
     channel_read_info: &mut ReadInfo,
 ) -> (
     Option<get_live_reads_response::ActionResponse>,
@@ -925,6 +941,7 @@ fn process_samples_from_config(
                         config.global_mean_read_length,
                         sample,
                         config.parameters.get_sample_rate(),
+                        config.parameters.get_sequencing_speed(),
                     );
                 } else if entry.path().is_fasta() {
                     info!("Reading view of sequence for {:#?}", entry.path());
@@ -1006,6 +1023,7 @@ fn process_samples_from_config(
                     config.global_mean_read_length,
                     sample,
                     config.parameters.get_sample_rate(),
+                    config.parameters.get_sequencing_speed(),
                 );
             } else {
                 debug!("Sorry unsupported format!");
@@ -1150,7 +1168,8 @@ fn read_views_of_sequence_data(
             "Converting {}",
             String::from_utf8(fasta_record.id().to_vec()).unwrap()
         );
-        let read_length_dist = sample_info.get_read_len_dist(global_mean_read_length, sample_rate);
+        let read_length_dist =
+            sample_info.get_read_len_dist(global_mean_read_length, sample_rate, sequencing_speed);
         let file_info = FileInfo::new(
             None,
             Some(
@@ -1191,6 +1210,7 @@ fn read_views_of_squiggle_data(
     global_mean_read_length: Option<f64>,
     sample_info: &Sample,
     sampling: u64,
+    sequencing_speed: usize,
 ) {
     info!(
         "Reading squiggle information for {:#?} for sample {:#?}",
@@ -1202,7 +1222,8 @@ fn read_views_of_squiggle_data(
     let view: ArrayBase<ViewRepr<&i16>, Dim<[usize; 1]>> =
         ArrayView1::<i16>::view_npy(&mmap).unwrap();
     // let size = view.shape()[0];
-    let read_length_dist = sample_info.get_read_len_dist(global_mean_read_length, sampling);
+    let read_length_dist =
+        sample_info.get_read_len_dist(global_mean_read_length, sampling, sequencing_speed);
     let file_info = FileInfo::new(Some(view.to_owned()), None);
     let sample = views
         .entry(sample_info.name.clone())
@@ -1338,13 +1359,18 @@ fn generate_read(
     // earliest possible start point in file, match is for amplicons so we don't start halfway through
     let start: usize = match sample_info.is_amplicon {
         true => 0,
-        false => rng.gen_range(0..file_info.contig_len - 1000),
+        // Guard against underflow / empty range on short references (contig_len <= 1000).
+        false if file_info.contig_len > 1000 => rng.gen_range(0..file_info.contig_len - 1000),
+        false => 0,
     };
     // Get our distribution from either the Sample specified Gamma or the global read length
     let read_distribution = &sample_info.read_len_dist;
     let read_length: usize = read_distribution.sample(rng) as usize;
-    // don;t over slice our read
-    let end: usize = cmp::min(start + read_length, file_info.contig_len - 1);
+    // don;t over slice our read. Amplicon reads always span the whole squiggle file.
+    let end: usize = match sample_info.is_amplicon {
+        true => file_info.contig_len,
+        false => cmp::min(start + read_length, file_info.contig_len - 1),
+    };
     // let end = file_info.contig_len - 1;
     let (mut barcode_1_squig, mut barcode_2_squig) = (vec![], vec![]);
     // Barcode name has been provided for this sample
@@ -1609,8 +1635,8 @@ impl DataService for DataServiceServicer {
         let data_lock = Arc::clone(&self.read_data);
         let data_lock_unblock = Arc::clone(&self.read_data);
         let setup = Arc::clone(&self.setup.clone());
-        let tx_unblocks = { start_unblock_thread(data_lock_unblock, setup) };
         let channel_size = self.channel_size;
+        let tx_unblocks = { start_unblock_thread(data_lock_unblock, setup, channel_size) };
         let mut stream_counter = 1;
         let break_chunk_ms = self.break_chunks_ms;
         let sample_rate_hz = self.sample_rate_hz;
@@ -1668,7 +1694,9 @@ impl DataService for DataServiceServicer {
                                 let mut start: usize = read_info.prev_chunk_start;
                                 let now_time = Utc::now();
                                 let previous_access_time = read_info.time_accessed;
-                                let elapsed_time = now_time.time() - previous_access_time.time();
+                                // Subtract full datetimes, not .time() (time-of-day), so the
+                                // accrued-signal delta stays correct across midnight.
+                                let elapsed_time = now_time - previous_access_time;
                                 // How far through the read we are in total samples
                                 // Convert sample_rate_hz into microseconds
                                 let chunk_to_serve_length: usize = ((sample_rate_hz as f64 / 1_000_000_f64)  * elapsed_time.num_microseconds().unwrap() as f64) as usize;
@@ -1738,7 +1766,8 @@ impl DataService for DataServiceServicer {
                         channel_data.clear();
                     }
                     container.clear();
-                    thread::sleep(Duration::from_millis(break_chunk_ms));
+                    // Async sleep — never block a tokio worker thread inside a spawned task.
+                    tokio::time::sleep(Duration::from_millis(break_chunk_ms)).await;
                 }
 
             });

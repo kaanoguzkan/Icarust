@@ -61,35 +61,51 @@ server cert (see bug #2), then `Manager(host="localhost", port=10000)` →
   - **Fix:** `secure: a_port as u32` (field is `u32`, not `i32`).
   - **Done:** verified — config.ini position=10055 → manager advertises 10055, client connected to it.
 
-- [ ] **#6 Read-length→samples scaling ignores `sequencing_speed`** — `src/main.rs:250-251`
+- [x] **#6 Read-length→samples scaling ignores `sequencing_speed`** — `src/main.rs:250-251` ✅ DONE
   - `ReadLengthDist::new(mrl / 400.0 * sample_rate)` hardcodes 400, but signal uses `samples_per_base = sample_rate / sequencing_speed` (`src/impl_services/data.rs:1145`). With `sequencing_speed=450` (in `config_dnar9.toml`!) lengths disagree → wrong durations.
   - **Fix:** divide by `sequencing_speed`, not 400.
+  - **Done:** `get_read_len_dist` now takes `sequencing_speed`; threaded through `read_views_of_sequence_data` + `read_views_of_squiggle_data` (and both call sites). Runs clean with `sequencing_speed=450`.
 
-- [ ] **#7 Hardcoded 3000-element action arrays cap channels** — `src/impl_services/data.rs:616, 668`
+- [x] **#7 Hardcoded 3000-element action arrays cap channels** — `src/impl_services/data.rs:616, 668` ✅ DONE
   - `read_numbers_actioned: [0; 3000]` indexed by channel number; `channels > 3000` ⇒ index-out-of-bounds panic on unblock/stop-receiving.
   - **Fix:** size from `channel_size` (use a `Vec`).
+  - **Done:** `vec![0u32; channel_size]`; param types `&mut [u32]`; `start_unblock_thread` takes `channel_size`. Verified: ran with channels=4000, no panic.
 
 ## 🟡 Medium — edge cases / robustness
 
-- [ ] **#8 Read start underflows on short references** — `src/impl_services/data.rs:1341`
+- [x] **#8 Read start underflows on short references** — `src/impl_services/data.rs:1341` ✅ DONE
   - `rng.gen_range(0..contig_len - 1000)` panics if `contig_len <= 1000` (small FASTAs, e.g. `ENO2.fa`/pico). `usize` underflow or `gen_range(0..0)`.
   - **Fix:** guard/clamp the floor against `contig_len`.
+  - **Done:** `false if contig_len > 1000 => gen_range(...)` else `0`. Verified with an 82-base reference — no underflow, reads generated.
 
-- [ ] **#9 Wall-clock `.time()` subtraction drops the date** — `src/impl_services/data.rs:487, 1671`
+- [x] **#9 Wall-clock `.time()` subtraction drops the date** — `src/impl_services/data.rs:487, 1671` ✅ DONE
   - `unblock_time.time() - prev_time.time()` and `now_time.time() - previous_access_time.time()` use time-of-day only; across midnight/>24h goes negative → corrupts chunk slicing + unblock truncation.
   - **Fix:** subtract full `DateTime<Utc>` values.
+  - **Done:** both now subtract full `DateTime<Utc>` (same `TimeDelta` type, so downstream `num_milliseconds`/`num_microseconds` unchanged).
 
-- [ ] **#10 Blocking `thread::sleep` inside async task** — `src/impl_services/data.rs:1741`
+- [x] **#10 Blocking `thread::sleep` inside async task** — `src/impl_services/data.rs:1741` ✅ DONE
   - Chunk-serving loop in `tokio::spawn` calls `std::thread::sleep(break_chunk_ms)`, blocking a tokio worker ~400ms/cycle.
   - **Fix:** `tokio::time::sleep(...).await`.
+  - **Done:** replaced with `tokio::time::sleep(...).await`.
 
-- [ ] **#11 Amplicon reads aren't full-length** — `src/impl_services/data.rs:1339-1347`
+- [x] **#11 Amplicon reads aren't full-length** — `src/impl_services/data.rs:1339-1347` ✅ DONE
   - README says amplicon ⇒ complete file length, but `end = min(start + read_length, contig_len-1)` still truncates.
   - **Fix:** for amplicons set `end = contig_len - 1`.
+  - **Done:** `end` is now `contig_len` for amplicons (full file), else the clamped read length.
 
-- [ ] **#12 Data loss on graceful shutdown** — `src/impl_services/data.rs:453-600`
+- [x] **#12 Data loss on graceful shutdown** — `src/impl_services/data.rs:453-600` ✅ DONE
   - Shutdown drains at most 4000 reads then breaks; extras (and reads still in channel) dropped.
   - **Fix:** loop-drain all remaining reads before breaking.
+  - **Done:** `if` → `while len>=4000 || (z && !empty)`; `run_info` made a per-file closure (`build_run_info()`) so each drained file gets its own. Verified: SIGINT wrote a final partial file (20→21) before clean exit.
+
+## 🔴 Newly discovered during PR2 testing
+
+- [x] **#19 FAST5 (default) write panics — VBZ plugin not loaded** — `src/impl_services/data.rs:352, 545` ✅ FIXED (robustness) / ⚠️ platform gap remains
+  - First FAST5 file write (every ~4000 reads) panicked: `Result::unwrap()` on `Err: Filter not available: User(32020, ...)` (32020 = VBZ HDF5 filter). The write-out thread died, then the data thread panicked on `complete_read_tx.send(...).unwrap()` (`:1526`). **Default mode is FAST5, so a normal run crashed once it tried to write.**
+  - **Root cause (investigated):** (1) the `set_var("HDF5_PLUGIN_PATH", ...)` line was **commented out** (`:352`), so HDF5 couldn't find the VBZ filter; (2) on Apple Silicon the bundled `vbz_plugin/libvbz_hdf_plugin.dylib` is **x86_64-only** (`file` confirms `Mach-O ... x86_64`) — arm64 HDF5 physically can't load it, and there's no arm64 macOS build in `vbz_plugin/` (only Linux `.so`s + Windows `.dll`).
+  - Not caught earlier because short runs stopped before 4000 reads accrued. POD5 (`-p`) is unaffected (pure Rust, no HDF5).
+  - **Done:** (a) `main.rs` now sets `HDF5_PLUGIN_PATH` to the absolute `vbz_plugin` dir at startup (respects an existing override) → fixes Linux/x86_64 where the plugin matches; (b) FAST5 write failure now logs one error per file and **keeps the simulator running** instead of cascade-crashing — verified on arm64: 0 panics, 0 SendError, reads keep flowing, client can still connect.
+  - **Remaining (platform limitation, not a code bug):** no arm64-macOS VBZ plugin is bundled, so FAST5 output still won't write on Apple Silicon — use POD5 (`-p`). Building VBZ from source for arm64 macOS would close this (see commented build step in `docker/Dockerfile`).
 
 ## 🔵 Low — doc/behavior mismatches & cleanup
 
@@ -104,7 +120,7 @@ server cert (see bug #2), then `Manager(host="localhost", port=10000)` →
 
 ## Suggested sequencing
 
-1. **PR 1 (correctness-critical, low-risk):** #1, #2, #3, #4, #5. Verify each against a live run + Python client.
-2. **PR 2 (edge cases):** #6, #7, #8, #9, #10, #11, #12.
-3. **PR 3 (cleanup):** #13-#18.
-</content>
+1. ~~**PR 1 (correctness-critical, low-risk):** #1, #2, #3, #4, #5.~~ ✅ DONE — verified against live run + Python client.
+2. ~~**PR 2 (edge cases):** #6, #7, #8, #9, #10, #11, #12.~~ ✅ DONE — verified (channels=4000, tiny ref, shutdown drain).
+3. **#19 (FAST5/VBZ)** — newly found; default-mode crash on write, needs investigation.
+4. **PR 3 (cleanup):** #13-#18.
